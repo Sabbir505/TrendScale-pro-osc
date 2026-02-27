@@ -1,0 +1,514 @@
+//@version=5
+indicator("TrendScale Pro Osc", overlay=false, format=format.price, precision=2)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODE SELECTOR
+// ══════════════════════════════════════════════════════════════════════════════
+displayMode = input.string(title="Display Mode", defval="RSI", options=["RSI", "SDO", "EOT", "Combined"], group="Mode")
+useHTF     = input.bool(title="Use Higher Timeframe Data", defval=false, group="Mode", tooltip="When enabled, oscillator calculations use the selected higher timeframe instead of the chart timeframe")
+htfTF      = input.timeframe(title="Higher Timeframe", defval="D", group="Mode", tooltip="Timeframe for oscillator data (e.g. D=Daily, W=Weekly, 240=4H)")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI SETTINGS
+// ══════════════════════════════════════════════════════════════════════════════
+rsiLength      = input.int(title="RSI Length", defval=14, minval=2, group="RSI Settings")
+rsiOB          = input.float(title="Overbought Level", defval=70.0, group="RSI Settings")
+rsiOS          = input.float(title="Oversold Level", defval=30.0, group="RSI Settings")
+rsiColorOB     = input.color(title="Overbought Color", defval=color.red, group="RSI Settings")
+rsiColorOS     = input.color(title="Oversold Color", defval=color.green, group="RSI Settings")
+rsiColorNorm   = input.color(title="Normal Color", defval=color.orange, group="RSI Settings")
+rsiShowDiv     = input.bool(title="Show Divergences", defval=true, group="RSI Settings")
+rsiShowPivots  = input.bool(title="Show Pivots", defval=true, group="RSI Settings")
+rsiDivLookback = input.int(title="Divergence Lookback", defval=30, minval=5, maxval=100, group="RSI Settings")
+rsiPivotLen    = input.int(title="Pivot Length", defval=5, minval=1, maxval=20, group="RSI Settings")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SDO SETTINGS
+// ══════════════════════════════════════════════════════════════════════════════
+sdoStochLen    = input.int(title="Stochastic Length", defval=14, minval=2, group="SDO Settings")
+sdoDonchianLen = input.int(title="Donchian Length", defval=20, minval=2, group="SDO Settings")
+sdoSmoothing   = input.int(title="SDO Smoothing", defval=3, minval=1, group="SDO Settings")
+sdoSignalLen   = input.int(title="Signal Length", defval=9, minval=1, group="SDO Settings")
+sdoOB          = input.float(title="Overbought Level", defval=80.0, group="SDO Settings")
+sdoOS          = input.float(title="Oversold Level", defval=20.0, group="SDO Settings")
+sdoShowBoxes   = input.bool(title="Show Zone Boxes", defval=true, group="SDO Settings")
+sdoShowDiv     = input.bool(title="Show Divergences", defval=true, group="SDO Settings")
+sdoPivotLen    = input.int(title="Pivot Length", defval=5, minval=1, maxval=20, group="SDO Settings")
+sdoDivLookback = input.int(title="Divergence Lookback", defval=30, minval=5, maxval=100, group="SDO Settings")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EOT SETTINGS
+// ══════════════════════════════════════════════════════════════════════════════
+eotLength1     = input.int(title="HP Filter Length", defval=48, minval=5, group="EOT Settings")
+eotLength2     = input.int(title="Super Smoother Length", defval=10, minval=2, group="EOT Settings")
+eotTriggerLen  = input.int(title="Trigger Length", defval=3, minval=1, group="EOT Settings")
+eotOBLevel     = input.float(title="Overbought Level", defval=0.9, step=0.05, group="EOT Settings")
+eotOSLevel     = input.float(title="Oversold Level", defval=-0.9, step=0.05, group="EOT Settings")
+eotDeepOS      = input.float(title="Deep Oversold", defval=-0.95, step=0.01, group="EOT Settings")
+eotExtremeOS   = input.float(title="Extreme Oversold", defval=-0.98, step=0.01, group="EOT Settings")
+eotExhaustBars = input.int(title="Exhaustion Bars", defval=5, minval=2, group="EOT Settings")
+eotVolConfirm  = input.bool(title="Volume Confirmation", defval=true, group="EOT Settings")
+eotShowCont    = input.bool(title="Show Continuation", defval=true, group="EOT Settings")
+eotShowBounce  = input.bool(title="Show Bounce Signals", defval=true, group="EOT Settings")
+eotShowPressure = input.bool(title="Show Pressure Circles", defval=true, group="EOT Settings")
+eotShowOBWarn  = input.bool(title="Show OB Warnings", defval=true, group="EOT Settings")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMBINED SETTINGS
+// ══════════════════════════════════════════════════════════════════════════════
+combShowFlow   = input.bool(title="Show Flow Fill (Cloud)", defval=true, group="Combined Settings")
+combShowCenter = input.bool(title="Show Flow Center Line", defval=true, group="Combined Settings")
+combSqueezeThr = input.float(title="Squeeze Threshold", defval=10.0, step=1.0, group="Combined Settings")
+combAgreeLook  = input.int(title="Agreement Lookback", defval=2, minval=1, maxval=5, group="Combined Settings")
+combCloudMinTr = input.int(title="Cloud Min Transparency", defval=60, minval=0, maxval=100, group="Combined Settings")
+combCloudMaxTr = input.int(title="Cloud Max Transparency", defval=90, minval=0, maxval=100, group="Combined Settings")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Normalize any oscillator to 0-100 range
+normalize(val, len) =>
+    minVal = ta.lowest(val, len)
+    maxVal = ta.highest(val, len)
+    range_ = maxVal - minVal
+    range_ != 0 ? (val - minVal) / range_ * 100 : 50.0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CORE OSCILLATOR FUNCTIONS (for HTF support via request.security)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// RSI core calculation
+calcRSI() =>
+    ta.rsi(close, rsiLength)
+
+// SDO core calculation - returns [sdoVal, sdoSignal]
+calcSDO() =>
+    stK = ta.stoch(close, high, low, sdoStochLen)
+    dcH = ta.highest(high, sdoDonchianLen)
+    dcL = ta.lowest(low, sdoDonchianLen)
+    dcR = dcH - dcL
+    dOsc = dcR != 0 ? (close - dcL) / dcR * 100 : 50.0
+    raw = (stK + dOsc) / 2.0
+    val = ta.sma(raw, sdoSmoothing)
+    sig = ta.sma(val, sdoSignalLen)
+    [val, sig]
+
+// EOT core calculation - returns [eotVal, eotTrigger]
+calcEOT() =>
+    piVal = 2.0 * math.asin(1.0)
+    a1hp = (math.cos(0.707 * 2.0 * piVal / eotLength1) + math.sin(0.707 * 2.0 * piVal / eotLength1) - 1.0) / math.cos(0.707 * 2.0 * piVal / eotLength1)
+    var float hpF = 0.0
+    hpF := (1.0 - a1hp / 2.0) * (1.0 - a1hp / 2.0) * (close - 2.0 * nz(close[1]) + nz(close[2])) + 2.0 * (1.0 - a1hp) * nz(hpF[1]) - (1.0 - a1hp) * (1.0 - a1hp) * nz(hpF[2])
+    a1ss = math.exp(-1.414 * piVal / eotLength2)
+    b1ss = 2.0 * a1ss * math.cos(1.414 * piVal / eotLength2)
+    c2ss = b1ss
+    c3ss = -a1ss * a1ss
+    c1ss = 1.0 - c2ss - c3ss
+    var float filtF = 0.0
+    filtF := c1ss * (hpF + nz(hpF[1])) / 2.0 + c2ss * nz(filtF[1]) + c3ss * nz(filtF[2])
+    maxF = ta.highest(filtF, eotLength1)
+    minF = ta.lowest(filtF, eotLength1)
+    fRange = maxF - minF
+    eVal = fRange != 0 ? (filtF - minF) / fRange * 2.0 - 1.0 : 0.0
+    eTrig = ta.sma(eVal, eotTriggerLen)
+    [eVal, eTrig]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMPUTE OSCILLATOR VALUES (with optional HTF override)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Chart timeframe values (always computed for consistency)
+rsiValCTF = calcRSI()
+[sdoValCTF, sdoSignalCTF] = calcSDO()
+[eotValCTF, eotTriggerCTF] = calcEOT()
+
+// HTF values via request.security (only fetched when useHTF is true)
+rsiValHTF = request.security(syminfo.tickerid, htfTF, calcRSI(), lookahead=barmerge.lookahead_off)
+[sdoValHTF, sdoSignalHTF] = request.security(syminfo.tickerid, htfTF, calcSDO(), lookahead=barmerge.lookahead_off)
+[eotValHTF, eotTriggerHTF] = request.security(syminfo.tickerid, htfTF, calcEOT(), lookahead=barmerge.lookahead_off)
+
+// Select active values based on HTF toggle
+rsiVal = useHTF ? rsiValHTF : rsiValCTF
+sdoVal = useHTF ? sdoValHTF : sdoValCTF
+sdoSignal = useHTF ? sdoSignalHTF : sdoSignalCTF
+eotVal = useHTF ? eotValHTF : eotValCTF
+eotTrigger = useHTF ? eotTriggerHTF : eotTriggerCTF
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI ENGINE - Signal Detection (core value from calcRSI above)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// RSI line color
+rsiLineColor = rsiVal >= rsiOB ? rsiColorOB : rsiVal <= rsiOS ? rsiColorOS : rsiColorNorm
+
+// RSI Pivots
+rsiPivotHigh = ta.pivothigh(rsiVal, rsiPivotLen, rsiPivotLen)
+rsiPivotLow  = ta.pivotlow(rsiVal, rsiPivotLen, rsiPivotLen)
+
+// RSI Divergence Detection
+var float rsiPrevPivotHighVal = na
+var int   rsiPrevPivotHighBar = na
+var float rsiPrevPivotLowVal  = na
+var int   rsiPrevPivotLowBar  = na
+var float rsiPrevPriceAtHigh  = na
+var float rsiPrevPriceAtLow   = na
+
+rsiBullDiv = false
+rsiBearDiv = false
+
+// Pre-compute at global scope (Pine Script requirement)
+rsiPriceLow  = ta.lowest(low, rsiPivotLen * 2 + 1)[rsiPivotLen]
+rsiPriceHigh = ta.highest(high, rsiPivotLen * 2 + 1)[rsiPivotLen]
+
+if not na(rsiPivotLow)
+    if not na(rsiPrevPivotLowVal) and (bar_index - rsiPivotLen - nz(rsiPrevPivotLowBar)) <= rsiDivLookback
+        if rsiPriceLow < rsiPrevPriceAtLow and rsiPivotLow > rsiPrevPivotLowVal
+            rsiBullDiv := true
+    rsiPrevPivotLowVal  := rsiPivotLow
+    rsiPrevPivotLowBar  := bar_index - rsiPivotLen
+    rsiPrevPriceAtLow   := rsiPriceLow
+
+if not na(rsiPivotHigh)
+    if not na(rsiPrevPivotHighVal) and (bar_index - rsiPivotLen - nz(rsiPrevPivotHighBar)) <= rsiDivLookback
+        if rsiPriceHigh > rsiPrevPriceAtHigh and rsiPivotHigh < rsiPrevPivotHighVal
+            rsiBearDiv := true
+    rsiPrevPivotHighVal := rsiPivotHigh
+    rsiPrevPivotHighBar := bar_index - rsiPivotLen
+    rsiPrevPriceAtHigh  := rsiPriceHigh
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SDO ENGINE - Signal Detection (core values from calcSDO above)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// SDO zone detection
+sdoInOB = sdoVal >= sdoOB
+sdoInOS = sdoVal <= sdoOS
+sdoWasOB = sdoVal[1] >= sdoOB and sdoVal < sdoOB
+sdoWasOS = sdoVal[1] <= sdoOS and sdoVal > sdoOS
+
+// SDO Cross signals
+sdoLongSignal  = sdoWasOS  // Exits oversold upward
+sdoShortSignal = sdoWasOB  // Exits overbought downward
+
+// SDO Zone box tracking
+var int sdoOBBoxStart = na
+var int sdoOSBoxStart = na
+
+if sdoInOB and not sdoInOB[1]
+    sdoOBBoxStart := bar_index
+if sdoInOS and not sdoInOS[1]
+    sdoOSBoxStart := bar_index
+
+// SDO Divergence Detection
+sdoPivotHigh = ta.pivothigh(sdoVal, sdoPivotLen, sdoPivotLen)
+sdoPivotLow  = ta.pivotlow(sdoVal, sdoPivotLen, sdoPivotLen)
+
+var float sdoPrevPivotHighVal = na
+var int   sdoPrevPivotHighBar = na
+var float sdoPrevPivotLowVal  = na
+var int   sdoPrevPivotLowBar  = na
+var float sdoPrevPriceAtHigh  = na
+var float sdoPrevPriceAtLow   = na
+
+sdoBullDiv = false
+sdoBearDiv = false
+
+// Pre-compute at global scope (Pine Script requirement)
+sdoPriceLow  = ta.lowest(low, sdoPivotLen * 2 + 1)[sdoPivotLen]
+sdoPriceHigh = ta.highest(high, sdoPivotLen * 2 + 1)[sdoPivotLen]
+
+if not na(sdoPivotLow)
+    if not na(sdoPrevPivotLowVal) and (bar_index - sdoPivotLen - nz(sdoPrevPivotLowBar)) <= sdoDivLookback
+        if sdoPriceLow < sdoPrevPriceAtLow and sdoPivotLow > sdoPrevPivotLowVal
+            sdoBullDiv := true
+    sdoPrevPivotLowVal  := sdoPivotLow
+    sdoPrevPivotLowBar  := bar_index - sdoPivotLen
+    sdoPrevPriceAtLow   := sdoPriceLow
+
+if not na(sdoPivotHigh)
+    if not na(sdoPrevPivotHighVal) and (bar_index - sdoPivotLen - nz(sdoPrevPivotHighBar)) <= sdoDivLookback
+        if sdoPriceHigh > sdoPrevPriceAtHigh and sdoPivotHigh < sdoPrevPivotHighVal
+            sdoBearDiv := true
+    sdoPrevPivotHighVal := sdoPivotHigh
+    sdoPrevPivotHighBar := bar_index - sdoPivotLen
+    sdoPrevPriceAtHigh  := sdoPriceHigh
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EOT ENGINE - Signal Detection (core values from calcEOT above)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EOT State detection
+eotBullish = eotVal > eotTrigger and eotVal > 0
+eotBearish = eotVal < eotTrigger and eotVal < 0
+eotDeepOversold = eotVal <= eotDeepOS
+eotExtremeOversold = eotVal <= eotExtremeOS
+eotDeepOverbought = eotVal >= -eotDeepOS  // Mirror
+
+// Exhaustion: stuck at bottom for N bars
+var int eotOSBarCount = 0
+eotOSBarCount := eotVal <= eotOSLevel ? eotOSBarCount + 1 : 0
+eotExhausted = eotOSBarCount >= eotExhaustBars
+
+// EOT Line Color
+eotLineColor = eotExhausted ? #9C27B0 : eotExtremeOversold ? color.white : eotDeepOversold ? color.yellow : eotBullish ? color.green : eotBearish ? color.red : color.gray
+
+// EOT Reversal detection
+eotReversal = eotVal > eotVal[1] and eotVal[1] <= eotVal[2]
+eotReversalDown = eotVal < eotVal[1] and eotVal[1] >= eotVal[2]
+
+// Volume confirmation
+volSMA = ta.sma(volume, 20)
+volHigh = volume > volSMA * 1.5
+
+// EOT Entry Signals (Long: Lime > Blue > Yellow > Gray)
+eotLongLime   = eotReversal and eotDeepOversold and volHigh  // Strongest
+eotLongBlue   = eotReversal and eotVal[1] < 0 and eotVal < 0 and not eotLongLime  // Strong
+eotLongYellow = eotReversal and eotVal <= eotOSLevel and not eotLongLime and not eotLongBlue  // Medium
+eotLongGray   = eotReversal and eotVal[1] < eotVal[2] and eotVal < 0 and not eotLongLime and not eotLongBlue and not eotLongYellow  // Basic
+
+eotLongAny = eotLongLime or eotLongBlue or eotLongYellow or eotLongGray
+
+// EOT Short Signal (mirror of Lime Long)
+eotShortRed = eotReversalDown and eotDeepOverbought and (not eotVolConfirm or volHigh)
+
+// EOT Continuation Signals
+var float eotPrevPivotH = na
+var float eotPrevPivotL = na
+eotPivH = ta.pivothigh(eotVal, 3, 3)
+eotPivL = ta.pivotlow(eotVal, 3, 3)
+if not na(eotPivH)
+    eotPrevPivotH := eotPivH
+if not na(eotPivL)
+    eotPrevPivotL := eotPivL
+
+eotContLong  = eotVal > 0 and eotVal[1] <= 0 and eotVal > nz(eotPrevPivotL) and ta.rising(eotVal, 2)
+eotContShort = eotVal < 0 and eotVal[1] >= 0 and eotVal < nz(eotPrevPivotH) and ta.falling(eotVal, 2)
+
+// EOT Bounce Signals
+eotBounceDown = eotVal[1] >= eotOBLevel and eotVal < eotVal[1] and eotVal[1] > eotVal[2]
+eotBounceUp   = eotVal[1] <= eotOSLevel and eotVal > eotVal[1] and eotVal[1] < eotVal[2]
+
+// EOT Pressure Circles
+eotPressureBull = eotVal <= eotOSLevel and volHigh
+eotPressureBear = eotVal >= eotOBLevel and volHigh
+
+// EOT Overbought Warnings
+eotOBWarn1 = eotVal >= eotOBLevel * 0.85 and eotVal < eotOBLevel  // Orange warning
+eotOBWarn2 = eotVal >= eotOBLevel  // Red warning
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMBINED MODE - Normalize all to 0-100 scale
+// ══════════════════════════════════════════════════════════════════════════════
+
+// RSI is already 0-100
+combRSI = rsiVal
+
+// SDO is already 0-100
+combSDO = sdoVal
+
+// EOT: normalize from -1..+1 to 0..100
+combEOT = (eotVal + 1.0) / 2.0 * 100.0
+
+// Flow calculations
+combMax = math.max(combRSI, math.max(combSDO, combEOT))
+combMin = math.min(combRSI, math.min(combSDO, combEOT))
+combCenter = ta.ema((combRSI + combSDO + combEOT) / 3.0, 3)
+combSpread = combMax - combMin
+
+// Squeeze detection
+combSqueeze = combSpread <= combSqueezeThr
+
+// Flow direction
+combCenterRising = combCenter > combCenter[1]
+combCenterColor = combSqueeze ? color.yellow : combCenterRising ? color.green : color.red
+
+// Cloud color and transparency
+combCloudBull = combCenter >= 50
+combCloudTransp = math.round(combCloudMaxTr - (combCloudMaxTr - combCloudMinTr) * math.min(combSpread / 50.0, 1.0))
+
+// Confluence Detection
+bullSignalCount = 0
+bearSignalCount = 0
+
+if rsiBullDiv
+    bullSignalCount += 1
+if sdoLongSignal or sdoBullDiv
+    bullSignalCount += 1
+if eotLongAny
+    bullSignalCount += 1
+
+if rsiBearDiv
+    bearSignalCount += 1
+if sdoShortSignal or sdoBearDiv
+    bearSignalCount += 1
+if eotShortRed
+    bearSignalCount += 1
+
+confluenceLong  = bullSignalCount >= 2
+confluenceShort = bearSignalCount >= 2
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - RSI MODE
+// ══════════════════════════════════════════════════════════════════════════════
+
+showRSI = displayMode == "RSI"
+
+// RSI line
+plot(showRSI ? rsiVal : na, title="RSI", color=rsiLineColor, linewidth=2)
+
+// RSI levels
+hline(showRSI ? rsiOB : na, title="RSI OB", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+hline(showRSI ? rsiOS : na, title="RSI OS", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(showRSI ? 50 : na, title="RSI Mid", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// RSI Divergence labels
+plotshape(showRSI and rsiShowDiv and rsiBullDiv ? rsiVal[rsiPivotLen] : na, title="RSI Bull Div", text="Bull", textcolor=color.white, style=shape.labelup, location=location.absolute, color=color.new(color.teal, 0), size=size.small, offset=-rsiPivotLen)
+plotshape(showRSI and rsiShowDiv and rsiBearDiv ? rsiVal[rsiPivotLen] : na, title="RSI Bear Div", text="Bear", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.new(color.red, 0), size=size.small, offset=-rsiPivotLen)
+
+// RSI Pivot labels
+plotshape(showRSI and rsiShowPivots and not na(rsiPivotHigh) ? rsiPivotHigh : na, title="RSI Pivot High", text="Pivot", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.new(color.blue, 0), size=size.tiny, offset=-rsiPivotLen)
+plotshape(showRSI and rsiShowPivots and not na(rsiPivotLow) ? rsiPivotLow : na, title="RSI Pivot Low", text="Pivot", textcolor=color.white, style=shape.labelup, location=location.absolute, color=color.new(color.blue, 0), size=size.tiny, offset=-rsiPivotLen)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - SDO MODE
+// ══════════════════════════════════════════════════════════════════════════════
+
+showSDO = displayMode == "SDO"
+
+// SDO lines
+sdoPlot = plot(showSDO ? sdoVal : na, title="SDO", color=color.white, linewidth=2)
+sdoSigPlot = plot(showSDO ? sdoSignal : na, title="SDO Signal", color=color.gray, linewidth=1)
+
+// SDO fill between SDO and Signal
+sdoFillColor = sdoVal >= sdoSignal ? color.new(color.green, 60) : color.new(color.red, 60)
+fill(sdoPlot, sdoSigPlot, color=showSDO ? sdoFillColor : na, title="SDO Momentum Fill")
+
+// SDO levels
+hline(showSDO ? sdoOB : na, title="SDO OB", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+hline(showSDO ? sdoOS : na, title="SDO OS", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(showSDO ? 50 : na, title="SDO Mid", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// SDO Zone Boxes
+if showSDO and sdoShowBoxes and sdoWasOB and not na(sdoOBBoxStart)
+    box.new(sdoOBBoxStart, sdoOB + 5, bar_index, sdoOB, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 60), border_width=1)
+    sdoOBBoxStart := na
+
+if showSDO and sdoShowBoxes and sdoWasOS and not na(sdoOSBoxStart)
+    box.new(sdoOSBoxStart, sdoOS, bar_index, sdoOS - 5, bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 60), border_width=1)
+    sdoOSBoxStart := na
+
+// SDO Cross signals
+plotshape(showSDO and sdoLongSignal ? sdoVal : na, title="SDO Long", style=shape.triangleup, location=location.absolute, color=color.white, size=size.small)
+plotshape(showSDO and sdoShortSignal ? sdoVal : na, title="SDO Short", style=shape.triangledown, location=location.absolute, color=color.white, size=size.small)
+
+// SDO Divergence labels
+plotshape(showSDO and sdoShowDiv and sdoBullDiv ? sdoVal[sdoPivotLen] : na, title="SDO Bull Div", text="Bull", textcolor=color.white, style=shape.labelup, location=location.absolute, color=color.new(color.teal, 0), size=size.small, offset=-sdoPivotLen)
+plotshape(showSDO and sdoShowDiv and sdoBearDiv ? sdoVal[sdoPivotLen] : na, title="SDO Bear Div", text="Bear", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.new(color.red, 0), size=size.small, offset=-sdoPivotLen)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - EOT MODE
+// ══════════════════════════════════════════════════════════════════════════════
+
+showEOT = displayMode == "EOT"
+
+// EOT lines
+plot(showEOT ? eotVal : na, title="EOT", color=eotLineColor, linewidth=2)
+plot(showEOT ? eotTrigger : na, title="EOT Trigger", color=color.new(color.white, 60), linewidth=1)
+
+// EOT levels
+hline(showEOT ? eotOBLevel : na, title="EOT OB", color=color.new(color.red, 50), linestyle=hline.style_dotted)
+hline(showEOT ? eotOSLevel : na, title="EOT OS", color=color.new(color.green, 50), linestyle=hline.style_dotted)
+hline(showEOT ? 0 : na, title="EOT Zero", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// EOT Entry Labels (at top of pane)
+plotshape(showEOT and eotLongLime ? eotOBLevel + 0.15 : na, title="EOT Long Lime", text="Long", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.lime, size=size.small)
+plotshape(showEOT and eotLongBlue ? eotOBLevel + 0.15 : na, title="EOT Long Blue", text="Long", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.blue, size=size.small)
+plotshape(showEOT and eotLongYellow ? eotOBLevel + 0.15 : na, title="EOT Long Yellow", text="Long", textcolor=color.black, style=shape.labeldown, location=location.absolute, color=color.yellow, size=size.small)
+plotshape(showEOT and eotLongGray ? eotOBLevel + 0.15 : na, title="EOT Long Gray", text="Long", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.gray, size=size.small)
+plotshape(showEOT and eotShortRed ? eotOBLevel + 0.15 : na, title="EOT Short", text="Short", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.red, size=size.small)
+
+// EOT Continuation
+plotshape(showEOT and eotShowCont and eotContLong ? eotOSLevel - 0.15 : na, title="EOT Cont Long", text="Cont", textcolor=color.white, style=shape.triangleup, location=location.absolute, color=color.green, size=size.small)
+plotshape(showEOT and eotShowCont and eotContShort ? eotOBLevel + 0.15 : na, title="EOT Cont Short", text="Cont", textcolor=color.white, style=shape.triangledown, location=location.absolute, color=color.red, size=size.small)
+
+// EOT Bounce Signals
+plotshape(showEOT and eotShowBounce and eotBounceDown ? eotOBLevel + 0.05 : na, title="EOT Bounce Down", style=shape.triangledown, location=location.absolute, color=color.yellow, size=size.tiny)
+plotshape(showEOT and eotShowBounce and eotBounceUp ? eotOSLevel - 0.05 : na, title="EOT Bounce Up", style=shape.triangleup, location=location.absolute, color=color.yellow, size=size.tiny)
+
+// EOT Pressure Circles
+plotshape(showEOT and eotShowPressure and eotPressureBull ? eotTrigger : na, title="EOT Pressure Bull", style=shape.circle, location=location.absolute, color=color.green, size=size.tiny)
+plotshape(showEOT and eotShowPressure and eotPressureBear ? eotTrigger : na, title="EOT Pressure Bear", style=shape.circle, location=location.absolute, color=color.red, size=size.tiny)
+
+// EOT Overbought Warnings (circles at bottom)
+plotshape(showEOT and eotShowOBWarn and eotOBWarn1 and not eotOBWarn2 ? eotOSLevel - 0.2 : na, title="EOT OB Warn", style=shape.circle, location=location.absolute, color=color.orange, size=size.tiny)
+plotshape(showEOT and eotShowOBWarn and eotOBWarn2 ? eotOSLevel - 0.2 : na, title="EOT OB Strong", text="OB", textcolor=color.red, style=shape.circle, location=location.absolute, color=color.red, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - COMBINED MODE
+// ══════════════════════════════════════════════════════════════════════════════
+
+showComb = displayMode == "Combined"
+
+// Three oscillator lines
+plot(showComb ? combRSI : na, title="Comb RSI", color=color.orange, linewidth=1)
+plot(showComb ? combSDO : na, title="Comb SDO", color=color.white, linewidth=1)
+plot(showComb ? combEOT : na, title="Comb EOT", color=color.blue, linewidth=1)
+
+// Flow Fill (Cloud)
+combMaxPlot = plot(showComb and combShowFlow ? combMax : na, title="Flow Max", color=color.new(color.white, 100), display=display.none)
+combMinPlot = plot(showComb and combShowFlow ? combMin : na, title="Flow Min", color=color.new(color.white, 100), display=display.none)
+
+combCloudColor = combCloudBull ? color.new(color.green, combCloudTransp) : color.new(color.red, combCloudTransp)
+fill(combMaxPlot, combMinPlot, color=showComb and combShowFlow ? combCloudColor : na, title="Flow Cloud")
+
+// Flow Center Line
+plot(showComb and combShowCenter ? combCenter : na, title="Flow Center", color=combCenterColor, linewidth=2)
+
+// Combined levels
+hline(showComb ? 70 : na, title="Comb OB", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+hline(showComb ? 30 : na, title="Comb OS", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(showComb ? 50 : na, title="Comb Mid", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// Combined signal markers
+// RSI divergence = squares
+plotshape(showComb and rsiBullDiv ? combRSI[rsiPivotLen] : na, title="Comb RSI Bull", style=shape.square, location=location.absolute, color=color.green, size=size.tiny, offset=-rsiPivotLen)
+plotshape(showComb and rsiBearDiv ? combRSI[rsiPivotLen] : na, title="Comb RSI Bear", style=shape.square, location=location.absolute, color=color.red, size=size.tiny, offset=-rsiPivotLen)
+
+// SDO cross = triangles
+plotshape(showComb and sdoLongSignal ? combSDO : na, title="Comb SDO Long", style=shape.triangleup, location=location.absolute, color=color.white, size=size.tiny)
+plotshape(showComb and sdoShortSignal ? combSDO : na, title="Comb SDO Short", style=shape.triangledown, location=location.absolute, color=color.white, size=size.tiny)
+
+// EOT entry = circles
+plotshape(showComb and eotLongAny ? combEOT : na, title="Comb EOT Long", style=shape.circle, location=location.absolute, color=color.green, size=size.tiny)
+plotshape(showComb and eotShortRed ? combEOT : na, title="Comb EOT Short", style=shape.circle, location=location.absolute, color=color.red, size=size.tiny)
+
+// Confluence Labels
+plotshape(showComb and confluenceLong ? 15 : na, title="★ LONG", text="★ LONG", textcolor=color.white, style=shape.labelup, location=location.absolute, color=color.green, size=size.tiny)
+plotshape(showComb and confluenceShort ? 85 : na, title="★ SHORT", text="★ SHORT", textcolor=color.white, style=shape.labeldown, location=location.absolute, color=color.red, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS (Always active regardless of display mode)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EOT Alerts
+alertcondition(eotLongAny, title="EOT Long Signal", message="GG-Osc: EOT Long Signal fired")
+alertcondition(eotShortRed, title="EOT Short Signal", message="GG-Osc: EOT Short Signal fired")
+alertcondition(eotContLong, title="EOT Cont Long", message="GG-Osc: EOT Continuation Long")
+alertcondition(eotContShort, title="EOT Cont Short", message="GG-Osc: EOT Continuation Short")
+
+// RSI Alerts
+alertcondition(rsiBullDiv, title="RSI Bull Div", message="GG-Osc: RSI Bullish Divergence detected")
+alertcondition(rsiBearDiv, title="RSI Bear Div", message="GG-Osc: RSI Bearish Divergence detected")
+
+// SDO Alerts
+alertcondition(sdoLongSignal, title="SDO Long Signal", message="GG-Osc: SDO exits oversold - Long Signal")
+alertcondition(sdoShortSignal, title="SDO Short Signal", message="GG-Osc: SDO exits overbought - Short Signal")
+
+// Combined Confluence Alerts
+alertcondition(confluenceLong, title="Confluence LONG", message="GG-Osc: ★ Confluence LONG - 2+ bullish signals")
+alertcondition(confluenceShort, title="Confluence SHORT", message="GG-Osc: ★ Confluence SHORT - 2+ bearish signals")
+
+// Bounce Alerts
+alertcondition(eotBounceDown, title="Bounce Down", message="GG-Osc: Bounce Down from overbought")
+alertcondition(eotBounceUp, title="Bounce Up", message="GG-Osc: Bounce Up from oversold")
